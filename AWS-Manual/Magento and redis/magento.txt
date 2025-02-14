@@ -1,0 +1,557 @@
+PHP8.1 install:
+sudo apt update && sudo apt install -y lsb-release ca-certificates apt-transport-https software-properties-common wget
+
+sudo wget -O /etc/apt/trusted.gpg.d/php.gpg https://packages.sury.org/php/apt.gpg
+echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/php.list
+
+sudo apt update
+
+sudo apt install -y php8.1 php8.1-fpm php8.1-cli php8.1-mysql php8.1-curl \
+php8.1-gd php8.1-mbstring php8.1-xml php8.1-bcmath php8.1-soap \
+php8.1-intl php8.1-zip php8.1-tokenizer php8.1-opcache php8.1-xsl \
+php8.1-imagick php8.1-redis php8.1-common
+-------------------------------------------
+Mysql install:
+sudo apt remove --purge mysql* mariadb*
+sudo apt autoremove
+sudo apt autoclean
+
+
+wget https://dev.mysql.com/get/mysql-apt-config_0.8.29-1_all.deb
+sudo dpkg -i mysql-apt-config_0.8.29-1_all.deb
+
+sudo apt update
+
+sudo apt install -y mysql-server
+
+sudo systemctl start mysql
+sudo systemctl enable mysql
+
+mysql -u root -p
+
+CREATE DATABASE magentotest;
+
+GRANT ALL PRIVILEGES ON magentotest.* TO 'root'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+--------------------------------------------
+Nginx :
+sudo apt install -y nginx
+sudo systemctl start nginx
+sudo systemctl enable nginx
+---------------------------
+Elastic search:
+wget -qO - https://artifacts.elastic.co/GPG-KEY-elasticsearch | sudo apt-key add -
+echo "deb https://artifacts.elastic.co/packages/7.x/apt stable main" | sudo tee /etc/apt/sources.list.d/elastic-7.x.list
+sudo apt update
+sudo apt install -y elasticsearch
+sudo systemctl start elasticsearch
+sudo systemctl enable elasticsearch
+----------------------------------------
+Composer:
+
+sudo apt install -y composer
+
+
+sudo mkdir -p /var/www/html/test.mgt.com 
+
+useradd test-ssh
+groupadd clp
+usermod -aG clp test-ssh
+passwd test-ssh
+
+sudo chown -R test-ssh:clp /var/www/html/test.mgt.com
+
+----------------------------------
+cd /var/www/html/test.mgt.com
+Create magento via composer:
+composer create-project --repository-url=https://repo.magento.com/ magento/project-community-edition .
+sudo find var generated vendor pub/static pub/media app/etc -type f -exec chmod g+w {} +
+sudo find var generated vendor pub/static pub/media app/etc -type d -exec chmod g+ws {} +
+
+
+php bin/magento setup:install --base-url=https://47.128.241.69 \
+--db-host=localhost --db-name=magentotest --db-user=root --db-password=mgt123 \
+--admin-firstname=Admin --admin-lastname=User --admin-email=admin@test.mgt.com \  
+--admin-user=admin --admin-password=admin@123 \
+--language=en_US --currency=INR --timezone=Asia/Kolkata \
+--use-rewrites=1 --search-engine=elasticsearch7 --elasticsearch-host=localhost \
+--elasticsearch-port=9200 --backend-frontname=admin
+
+-----------------------------------
+
+Add sample data:
+bin/magento sampledata:deploy
+bin/magento setup:upgrade
+-------------------------------------------------
+
+sudo chown -R test-ssh:clp /var/www/html/test.mgt.com
+
+Redis install:
+sudo apt install -y redis-server
+
+
+bin/magento setup:config:set --cache-backend=redis --cache-backend-redis-server=127.0.0.1 \
+--cache-backend-redis-db=0
+
+bin/magento setup:config:set --session-save=redis --session-save-redis-host=127.0.0.1 \
+--session-save-redis-db=1
+
+-------------------------------------------------------------
+Creating php fpm pool:
+sudo nano /etc/php/8.1/fpm/pool.d/test-ssh.conf
+
+[test-ssh]
+user = test-ssh
+group = clp
+listen = /run/php/php8.1-fpm-test-ssh.sock
+listen.owner = test-ssh
+listen.group = clp
+listen.mode = 0660
+
+pm = dynamic
+pm.max_children = 75
+pm.start_servers = 10
+pm.min_spare_servers = 5
+pm.max_spare_servers = 20
+pm.process_idle_timeout = 10s
+
+sudo chown -R test-ssh:clp /etc/php/8.1/fpm/pool.d/test-ssh.conf
+
+
+sudo systemctl restart php8.1-fpm
+----------------------------------------------
+
+changing nginx user:
+
+sudo nano /etc/nginx/nginx.conf
+
+user test-ssh;
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http{
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+
+sudo chown -R test-ssh:test-ssh /var/lib/nginx
+sudo chown -R test-ssh:test-ssh /var/log/nginx
+sudo chown -R test-ssh:test-ssh /var/cache/nginx
+---------------------------
+
+For changing base url in magento:
+cd /var/www/html/test.mgt.com
+php bin/magento setup:store-config:set --base-url="http://public-ip/"
+php bin/magento setup:store-config:set --base-url-secure="https://public-ip/"
+php bin/magento cache:flush
+
+
+
+--------------------------------------------------
+Creating nginx vhost:
+
+sudo nano /etc/nginx/sites-available/test.mgt.com
+
+
+upstream fastcgi_backend {
+     server unix:/run/php/php8.1-fpm-test-ssh.sock;
+}
+
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 47.128.241.69;  # Use your public IP
+
+    set $MAGE_ROOT /var/www/html/test.mgt.com;
+    set $MAGE_MODE developer;  # Change to 'production' if needed
+
+    root $MAGE_ROOT/pub;  # Magento must serve from /pub
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/magento-access.log;
+    error_log  /var/log/nginx/magento-error.log error;
+
+    location / {
+        index index.php index.html;
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location /static/ {
+        location ~ ^/static/version {
+            expires max;
+            log_not_found off;
+        }
+    }
+
+    location /media/ {
+        try_files $uri $uri/ /get.php?$args;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm-test-ssh.sock;
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+   location ~* \.(jpg|jpeg|gif|png|css|js|ico|xml|svg|ttf|woff|woff2|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name 47.128.241.69;
+
+    ssl_certificate /etc/ssl/certs/selfsigned.crt;
+    ssl_certificate_key /etc/ssl/private/selfsigned.key;
+
+    set $MAGE_ROOT /var/www/html/test.mgt.com;
+    set $MAGE_MODE developer;  # Change to 'production' if needed
+
+    root $MAGE_ROOT/pub;  # Magento must serve from /pub
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/magento-access.log;
+    error_log  /var/log/nginx/magento-error.log error;
+
+    location / {
+        index index.php index.html;
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location /static/ {
+        location ~ ^/static/version {
+            expires max;
+            log_not_found off;
+        }
+    }
+
+    location /media/ {
+        try_files $uri $uri/ /get.php?$args;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm-test.sock;
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+   location ~* \.(jpg|jpeg|gif|png|css|js|ico|xml|svg|ttf|woff|woff2|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+Creating certificate for https:
+
+ls -l /etc/ssl/certs/selfsigned.crt /etc/ssl/private/selfsigned.key
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+-keyout /etc/ssl/private/selfsigned.key \
+-out /etc/ssl/certs/selfsigned.crt
+
+
+sudo ln -s /etc/nginx/sites-available/test.mgt.com /etc/nginx/sites-enabled/
+sudo systemctl restart nginx
+
+-----------------------------------------
+Phpmyadmin:
+
+sudo apt install -y phpmyadmin
+
+sudo nano /etc/nginx/sites-available/phpmyadmin
+
+server {
+    listen 8080;
+    server_name 47.128.241.69;  # Public ip
+
+    root /var/www/html/phpmyadmin;
+    index index.php index.html index.htm;
+
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin;
+        index index.php index.html;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm-test-ssh.sock;  # Update this if using a different PHP version
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+
+server {
+    listen 443 ssl;
+    server_name pma.mgt.com;
+
+    root /usr/share/phpmyadmin;
+    index index.php index.html;
+
+    ssl_certificate /etc/ssl/certs/magento.crt;
+    ssl_certificate_key /etc/ssl/private/magento.key;           --------------- dont do this https 443 server now
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/var/run/php8.1-fpm-test-ssh.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}
+
+
+sudo ln -s /etc/nginx/sites-available/phpmyadmin /etc/nginx/sites-available/phpmyadmin
+ln -s /usr/share/phpmyadmin /var/www/html/
+chown -R test-ssh:clp /var/www/html/phpmyadmin
+
+
+--------------------------------
+Set php-8.1:
+
+
+sudo update-alternatives --set php /usr/bin/php8.1
+
+-----------------------------------------
+Install varnish:
+
+sudo apt install -y varnish
+bin/magento setup:config:set --http-cache-hosts=127.0.0.1:6081
+sudo bin/magento config:set --scope=default --scope-code=0 system/full_page_cache/caching_application 2
+
+
+sudo systemctl restart varnish
+sudo systemctl restart nginx
+------------------------------------------------------------
+Creating certificate for https:
+
+ls -l /etc/ssl/certs/selfsigned.crt /etc/ssl/private/selfsigned.key
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+-keyout /etc/ssl/private/selfsigned.key \
+-out /etc/ssl/certs/selfsigned.crt
+
+----------------------------------------------
+
+eroor cmnds:
+sudo tail -f /var/log/nginx/error.log
+sudo tail -f /var/log/php8.1-fpm.log
+-------------------------------------------
+
+
+
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# sudo nano /etc/nginx/sites-available/phpmyadmin
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# sudo nano /etc/nginx/sites-available/phpmyadmin
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# sudo nano /etc/nginx/sites-available/test.mgt.com
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# systemctl restart nginx
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# systemctl restart php8.1-fpm
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# nginx -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# sudo tail -f /var/log/nginx/error.log
+sudo tail -f /var/log/php8.1-fpm.log
+2025/02/09 17:53:25 [notice] 15869#15869: using inherited sockets from "5;6;"
+2025/02/09 19:22:28 [error] 32899#32899: *1 directory index of "/var/www/html/phpmyadmin/" is forbidden, client: 106.219.176.66, server: _, request: "GET /phpmyadmin/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 19:22:37 [error] 32899#32899: *1 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 19:35:24 [error] 33161#33161: *1 directory index of "/var/www/html/phpmyadmin/" is forbidden, client: 106.219.176.66, server: _, request: "GET /phpmyadmin/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 19:35:39 [error] 33161#33161: *1 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 19:53:00 [error] 33397#33397: *2 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 20:39:10 [error] 33877#33877: *1 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 20:39:11 [error] 33877#33877: *1 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 20:39:14 [error] 33877#33877: *1 directory index of "/var/www/html/test.mgt.com/" is forbidden, client: 106.219.176.66, server: _, request: "GET /test.mgt.com/ HTTP/1.1", host: "3.110.120.174"
+2025/02/09 20:39:22 [error] 33877#33877: *1 directory index of "/var/www/html/phpmyadmin/" is forbidden, client: 106.219.176.66, server: _, request: "GET /phpmyadmin/ HTTP/1.1", host: "3.110.120.174"
+^C
+[09-Feb-2025 20:34:54] NOTICE: Terminating ...
+[09-Feb-2025 20:34:54] NOTICE: exiting, bye-bye!
+[09-Feb-2025 20:34:54] NOTICE: fpm is running, pid 33820
+[09-Feb-2025 20:34:54] NOTICE: ready to handle connections
+[09-Feb-2025 20:34:54] NOTICE: systemd monitor interval set to 10000ms
+[09-Feb-2025 20:38:40] NOTICE: Terminating ...
+[09-Feb-2025 20:38:40] NOTICE: exiting, bye-bye!
+[09-Feb-2025 20:38:41] NOTICE: fpm is running, pid 33884
+[09-Feb-2025 20:38:41] NOTICE: ready to handle connections
+[09-Feb-2025 20:38:41] NOTICE: systemd monitor interval set to 10000ms
+^C
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# sudo tail -f /var/log/nginx/phpmyadmin_error.log
+sudo tail -f /var/log/nginx/example.journaldev.com-error.log
+2025/02/09 19:22:51 [crit] 32899#32899: *9 connect() to unix:/run/php/php8.1-fpm-www-data.sock failed (2: No such file or directory) while connecting to upstream, client: 106.219.176.66, server: pma.mgt.com, request: "GET /test.mgt.com/ HTTP/1.1", upstream: "fastcgi://unix:/run/php/php8.1-fpm-www-data.sock:", host: "3.110.120.174"
+^C
+^C
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d# ^C
+root@ip-192-168-1-226:/etc/php/8.1/fpm/pool.d#  ushaajoy1967@gmail.com Savabien123$%
+
+
+Final :
+
+
+sudo nano /etc/nginx/sites-available/test.mgt.com
+
+upstream fastcgi_backend {
+     server unix:/run/php/php8.1-fpm.sock;
+}
+
+
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 3.111.149.148;  # Use your public IP
+
+    set $MAGE_ROOT /var/www/html/test.mgt.com;
+    set $MAGE_MODE developer;  # Change to 'production' if needed
+
+    root $MAGE_ROOT/pub;  # Magento must serve from /pub
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/magento-access.log;
+    error_log  /var/log/nginx/magento-error.log error;
+
+    location / {
+        index index.php index.html;
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location /static/ {
+        location ~ ^/static/version {
+            expires max;
+            log_not_found off;
+        }
+    }
+
+    location /media/ {
+        try_files $uri $uri/ /get.php?$args;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+    }
+   location ~* \.(jpg|jpeg|gif|png|css|js|ico|xml|svg|ttf|woff|woff2|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+sudo nano /etc/nginx/sites-available/phpmyadmin
+
+server {
+    listen 80;
+    server_name pma.mgt.com;  # Accepts all requests
+
+    root /var/www/html/phpmyadmin;
+    index index.php index.html index.htm;
+
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin;
+        index index.php index.html;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;  # Update this if using a different PHP version
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+sudo nano /etc/php/8.1/fpm/pool.d/test-ssh.conf
+
+[test-ssh]
+user = test-ssh
+group = clp
+listen = run/php/php8.1-fpm-test-ssh.sock
+listen.owner = test-ssh
+listen.group = clp
+listen.mode = 0660
+
+pm = dynamic
+pm.max_children = 75
+pm.start_servers = 10
+pm.min_spare_servers = 5
+pm.max_spare_servers = 20
+pm.process_idle_timeout = 10s
+
+changing nginx user:
+
+sudo nano /etc/nginx/nginx.conf
+user test-ssh;
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+sudo chown -R test-ssh:test-ssh /var/lib/nginx
+sudo chown -R test-ssh:test-ssh /var/log/nginx
+sudo chown -R test-ssh:test-ssh /var/cache/nginx
+
+For change base url in magento:
+cd /var/www/html/test.mgt.com
+php bin/magento setup:store-config:set --base-url="http://test.mgt.com/"
+php bin/magento setup:store-config:set --base-url-secure="https://test.mgt.com/"
+php bin/magento cache:flush
+
+server {
+    listen 8080;
+    server_name 3.111.149.148;  # Accepts all requests
+
+    root /var/www/html/phpmyadmin;
+    index index.php index.html index.htm;
+
+    location /phpmyadmin {
+        alias /usr/share/phpmyadmin;
+        index index.php index.html;
+    }
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.1-fpm-test-ssh.sock;  # Update this if using a different PHP version
+        fastcgi_index index.php;
+        include fastcgi.conf;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|otf)$ {
+        expires max;
+        log_not_found off;
+    }
+}
+
+
+
+
+
+
+
+
+
+
